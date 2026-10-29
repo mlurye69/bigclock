@@ -29,6 +29,7 @@ command_list_text = (
     "• Алиса, выключи экран / включи экран\n"
     "• Алиса, выключить компьютер\n"
     "• Алиса, список команд\n"
+    "• Алиса, обновись\n"
     "• Алиса, прочти\n"
     "• Алиса, напомни [текст] через [X] минут/часов\n"
     "• Алиса, напомни [текст] [дата] в [время]\n"
@@ -389,6 +390,27 @@ def trigger_alarm():
     alarm_active = False
     alarm_time = None
 
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/mlurye69/bigclock/main/bigclock.py"
+
+def check_for_updates():
+    try:
+        response = requests.get(GITHUB_RAW_URL, timeout=10)
+        if response.status_code == 200:
+            remote_code = response.text
+            script_path = os.path.abspath(__file__)
+            
+            with open(script_path, "r", encoding="utf-8") as f:
+                local_code = f.read()
+                
+            if remote_code.strip() != local_code.strip():
+                print("Обнаружено обновление на GitHub. Применяю...")
+                with open(script_path, "w", encoding="utf-8") as f:
+                    f.write(remote_code)
+                speak_russian("Обновление загружено. Перезапускаю часы.")
+                os.execv(sys.executable, ['python'] + sys.argv)
+    except Exception as e:
+        print(f"Ошибка проверки обновлений: {e}")
+
 def fetch_weather():
     global current_weather_text, tomorrow_hourly_forecast, weekly_forecast_text, today_hourly_forecast
     if WEATHER_API_KEY != "YOUR_WEATHER_API_KEY":
@@ -721,4 +743,6 @@ restore_pending_reminders()
 voice_thread = threading.Thread(target=voice_listener_loop, daemon=True)
 voice_thread.start()
 
+# Add this right before root.mainloop()
+root.after(5000, check_for_updates)
 root.mainloop()
