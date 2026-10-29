@@ -29,6 +29,7 @@ command_list_text = (
     "• Алиса, выключи экран / включи экран\n"
     "• Алиса, выключить компьютер\n"
     "• Алиса, список команд\n"
+    "• Алиса, список напоминаний\n"  # <-- Added here
     "• Алиса, обновись\n"
     "• Алиса, прочти\n"
     "• Алиса, напомни [текст] через [X] минут/часов\n"
@@ -354,6 +355,36 @@ def show_command_list_screen(text_content, announcement_text):
     weather_timer = threading.Timer(60.0, restore_clock_mode)
     weather_timer.start()
 
+def show_reminders_screen():
+    global display_mode, weather_timer
+    display_mode = "weather"
+    
+    frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9)
+    
+    if weather_timer and weather_timer.is_alive():
+        weather_timer.cancel()
+        
+    reminders = load_reminders_from_disk()
+    if not reminders:
+        reminders_text = "Активных напоминаний нет."
+        speech_text = "У вас нет активных напоминаний."
+    else:
+        lines = []
+        for i, r in enumerate(reminders, 1):
+            dt_str = datetime.fromtimestamp(r["target_timestamp"]).strftime('%d.%m.%Y в %H:%M')
+            lines.append(f"{i}. {r['text']} ({dt_str})")
+        reminders_text = "\n".join(lines)
+        speech_text = f"У вас найдено активных напоминаний: {len(reminders)}"
+        
+    date_label.config(text="Список напоминаний")
+    time_label.config(text="", font=('Helvetica', 10))
+    weather_label.config(text=reminders_text, font=('Helvetica', 20, 'bold'), fg='white')
+    
+    speak_russian(speech_text)
+    
+    weather_timer = threading.Timer(60.0, restore_clock_mode)
+    weather_timer.start()
+
 def restore_clock_mode():
     global display_mode
     display_mode = "clock"
@@ -634,7 +665,9 @@ def process_command(query):
             screen_title = date_label.cget("text")
             screen_body = weather_label.cget("text")
             speak_russian(f"{screen_title}. {screen_body}")
-    elif any(w in command for w in ["список команд", "список", "команды", "справка"]):
+    elif any(w in command for w in ["список напоминаний", "напоминания", "мои напоминания"]):
+        show_reminders_screen()
+    elif any(w in command for w in ["список команд", "команды", "справка"]):
         show_command_list_screen(command_list_text, "Показываю список доступных команд")
     elif any(w in command for w in ["недел", "неделю"]):
         show_weather_screen_only(weekly_forecast_text, "Показываю погоду на неделю")
