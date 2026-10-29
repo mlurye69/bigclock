@@ -40,6 +40,7 @@ command_list_text = (
     "• Алиса, выключи будильник\n"
     "• Алиса, выключи экран / включи экран\n"
     "• Алиса, выключить компьютер\n"
+    "• Алиса, включи свет / выключи свет\n"
     "• Алиса, список команд\n"
     "• Алиса, список напоминаний\n"
     "• Алиса, обновись\n"
@@ -85,6 +86,7 @@ alarm_stop_event = threading.Event()
 active_audio_process = None
 
 display_mode = "clock"
+light_timer = None
 weather_timer = None
 
 def stop_all_audio():
@@ -319,7 +321,7 @@ def update_display():
     root.after(100, update_display)
 
 def shift_position():
-    if display_mode == "clock":
+    if display_mode == "clock":  # Only shift if we are in normal clock mode
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
         
@@ -329,14 +331,49 @@ def shift_position():
         new_x = random.randint(40, max_x)
         new_y = random.randint(40, max_y)
         
-        frame.place(x=new_x, y=new_y)
+        frame.place(x=new_x, y=new_y, relwidth=0.9, relheight=0.9, anchor='nw')
+        
     root.after(30000, shift_position)
+
+def turn_light_on():
+    global display_mode, light_timer
+    display_mode = "light"
+    
+    # Cancel any active timers
+    if light_timer and light_timer.is_alive():
+        light_timer.cancel()
+        
+    # Hide the main clock frame so it doesn't interfere
+    frame.place_forget()
+    
+    # Turn the entire root window background white
+    root.configure(background='white')
+    
+    # Auto-revert back after 10 minutes (600 seconds)
+    light_timer = threading.Timer(600.0, turn_light_off)
+    light_timer.start()
+
+def turn_light_off():
+    global display_mode, light_timer
+    if light_timer and light_timer.is_alive():
+        light_timer.cancel()
+        
+    display_mode = "clock"
+    
+    # Restore root window background to black
+    root.configure(background='black')
+    
+    # Put the clock frame back in its normal position
+    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
+    
+    shift_position()
 
 def show_weather_screen_only(text_content, announcement_text):
     global display_mode, weather_timer
     display_mode = "weather"
     
-    frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9)
+    # Use fixed coordinates instead of relx=0.5 anchor='center'
+    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
     
     if weather_timer and weather_timer.is_alive():
         weather_timer.cancel()
@@ -354,7 +391,8 @@ def show_command_list_screen(text_content, announcement_text):
     global display_mode, weather_timer
     display_mode = "weather"
     
-    frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9)
+    # Use fixed coordinates instead of relx=0.5 anchor='center'
+    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
     
     if weather_timer and weather_timer.is_alive():
         weather_timer.cancel()
@@ -372,7 +410,8 @@ def show_reminders_screen():
     global display_mode, weather_timer
     display_mode = "weather"
     
-    frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9)
+    # Use fixed coordinates instead of relx=0.5 anchor='center'
+    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
     
     if weather_timer and weather_timer.is_alive():
         weather_timer.cancel()
@@ -401,6 +440,8 @@ def show_reminders_screen():
 def restore_clock_mode():
     global display_mode
     display_mode = "clock"
+    # Reset back to a stable position before regular shifting kicks back in
+    frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9, anchor='nw')
 
 def trigger_alarm():
     global alarm_active, active_audio_process, alarm_time
@@ -682,6 +723,14 @@ def process_command(query):
     elif "включить экран" in command or "включи экран" in command:
         speak_russian("Включаю экран.")
         os.system("xrandr --output LVDS-1 --auto")
+    elif any(w in command for w in ["включи свет", "свет включи", "белый экран"]):
+        speak_russian("Включаю свет.")
+        turn_light_on()
+        return
+    elif any(w in command for w in ["выключи свет", "свет выключи"]):
+        speak_russian("Выключаю свет.")
+        turn_light_off()
+        return
     elif "выход" in command:
         speak_russian("Выключаю часы.")
         stop_all_audio()
@@ -773,6 +822,7 @@ def process_command(query):
         speak_russian(ai_answer)
 
 def voice_listener_loop():
+    time.sleep(5)  # Give PulseAudio/ALSA time to initialize on startup
     import pyaudio
     
     CHUNK = 4096
