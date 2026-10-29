@@ -9,6 +9,7 @@ import os
 import re
 import json
 import atexit
+import wikipedia
 from datetime import datetime, timedelta
 from google import genai
 
@@ -18,7 +19,9 @@ AI_API_KEY = "AQ.Ab8RN6K9ReO1Kc-dgXHHuSEsUUIBA-qOBE4MeF9obMSJUNwEhQ"  # Put your
 
 # Path to your custom MP3 alarm sound file
 CHIME_SOUND_PATH = "/home/mlurye/Sounds/alarm-clock-1.mp3"
-REMINDERS_FILE = "reminders.json"
+# Save reminders.json in the same folder where bigclock.py is stored
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REMINDERS_FILE = os.path.join(SCRIPT_DIR, "reminders.json")
 
 command_list_text = (
     "Доступные голосовые команды:\n"
@@ -29,9 +32,10 @@ command_list_text = (
     "• Алиса, выключи экран / включи экран\n"
     "• Алиса, выключить компьютер\n"
     "• Алиса, список команд\n"
-    "• Алиса, список напоминаний\n"  # <-- Added here
+    "• Алиса, список напоминаний\n"
     "• Алиса, обновись\n"
     "• Алиса, прочти\n"
+    "• Алиса, википедия [термин]\n"  # <-- Added here
     "• Алиса, напомни [текст] через [X] минут/часов\n"
     "• Алиса, напомни [текст] [дата] в [время]\n"
     "• Алиса, [ваш вопрос для ИИ]"
@@ -511,42 +515,81 @@ def fetch_weather():
     root.after(600000, fetch_weather)
 
 def speak_russian(text):
+    def speech_worker():
+        try:
+            from gtts import gTTS
+            tts = gTTS(text=text, lang='ru', slow=False)
+            tts.save("response.mp3")
+            global active_audio_process
+            active_audio_process = subprocess.Popen(
+                ["mpg123", "-q", "response.mp3"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            active_audio_process.wait()
+            if os.path.exists("response.mp3"):
+                os.remove("response.mp3")
+            active_audio_process = None
+        except Exception as e:
+            print(f"Ошибка речи: {e}")
+
+    # Run speech in a daemon thread so it can be interrupted instantly
+    threading.Thread(target=speech_worker, daemon=True).start()
+
+def search_wikipedia(query):
     try:
-        from gtts import gTTS
-        tts = gTTS(text=text, lang='ru', slow=False)
-        tts.save("response.mp3")
-        subprocess.run(["mpg123", "-q", "response.mp3"])
-        if os.path.exists("response.mp3"):
-            os.remove("response.mp3")
+        # Clean up common conversational filler words
+        clean_query = re.sub(r'^(сколько|что такое|кто такой|расскажи про|найди)\s+', '', query.lower()).strip()
+        if not clean_query:
+            clean_query = query
+            
+        url = f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
+        headers = {"User-Agent": "SmartClockBot/1.0 (personal project)"}
+        
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            search_results = data.get("query", {}).get("search", [])
+            if search_results:
+                page_title = search_results[0]["title"]
+                # Fetch page summary extract
+                summary_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(page_title)}"
+                sum_resp = requests.get(summary_url, headers=headers, timeout=5)
+                if sum_resp.status_code == 200:
+                    sum_data = sum_resp.json()
+                    extract = sum_data.get("extract")
+                    if extract:
+                        return extract
+                        
+        return "Не удалось найти информацию в Википедии."
     except Exception as e:
-        print(f"Ошибка речи: {e}")
+        print(f"Wikipedia API error: {e}")
+        return "Не удалось найти информацию в Википедии."
 
 def ask_ai(prompt):
     if AI_API_KEY == "YOUR_GEMINI_API_KEY":
         return "Пожалуйста, настройте API ключ искусственного интеллекта в коде."
     
     client = genai.Client(api_key=AI_API_KEY)
-    max_retries = 3
+    max_retries = 1
     
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=(
+                model="gemini-2.5-flash",  # Using a stable standard model name
+                contents=[
                     "Ты голосовой ассистент на умных часах. Отвечай кратко, по делу, "
                     f"исключительно на русском языке, максимум в 1-2 предложениях. Вопрос: {prompt}"
-                )
+                ]
             )
-            if response.text:
+            if response and response.text:
                 return response.text
-            else:
-                return "Не удалось получить ответ от сервера искусственного интеллекта."
         except Exception as e:
             print(f"AI error (попытка {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
-            else:
-                return "Сервер искусственного интеллекта перегружен. Попробуйте позже."
+                
+    print("ИИ недоступен. Перенаправляю запрос в Википедию...")
+    return search_wikipedia(prompt)
 
 def parse_alarm_time(query):
     time_match = re.search(r'(\d{1,2})[:\s](\d{2})', query)
@@ -596,6 +639,10 @@ def process_command(query):
     
     if not command:
         speak_russian("Слушаю вас.")
+    elif any(w in query for w in ["стоп", "хватит", "замолчи", "молчи"]):
+        stop_all_audio()
+        speak_russian("Остановлено.")
+        return
     elif "выключить компьютер" in command or "выключи компьютер" in command:
         speak_russian("Выключаю компьютер.")
         stop_all_audio()
@@ -684,6 +731,14 @@ def process_command(query):
         speak_russian("Проверяю обновления на GitHub.")
         check_for_updates()
         speak_russian("Обновлений не найдено.")
+    elif any(word in command for word in ["википедия", "найди в википедии"]):
+        term = command.replace("википедия", "").replace("найди в википедии", "").strip()
+        if term:
+            speak_russian(f"Ищу в Википедии: {term}")
+            result = search_wikipedia(term)
+            speak_russian(result)
+        else:
+            speak_russian("Что именно вы хотите найти в Википедии?")
     else:
         ai_answer = ask_ai(command)
         speak_russian(ai_answer)
