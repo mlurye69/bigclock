@@ -11,11 +11,20 @@ import json
 import atexit
 import wikipedia
 from datetime import datetime, timedelta
-from google import genai
+#from openai import OpenAI
+
+# Replace with your Groq API key
+GROQ_API_KEY = "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"
+
 
 # --- CONFIGURATION ---
 WEATHER_API_KEY = "f104c4b8251a042efaca44820f294ae8"  # OpenWeatherMap API key
-AI_API_KEY = "AQ.Ab8RN6K9ReO1Kc-dgXHHuSEsUUIBA-qOBE4MeF9obMSJUNwEhQ"  # Put your Google AI Studio API key here
+
+#from google import genai
+#AI_API_KEY = "AQ.Ab8RN6K9ReO1Kc-dgXHHuSEsUUIBA-qOBE4MeF9obMSJUNwEhQ"  # Put your Google AI Studio API key here
+
+#Groq URL  https://console.groq.com/
+#Groq API Key "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"
 
 # Path to your custom MP3 alarm sound file
 CHIME_SOUND_PATH = "/home/mlurye/Sounds/alarm-clock-1.mp3"
@@ -537,8 +546,15 @@ def speak_russian(text):
 
 def search_wikipedia(query):
     try:
-        # Clean up common conversational filler words
-        clean_query = re.sub(r'^(сколько|что такое|кто такой|расскажи про|найди)\s+', '', query.lower()).strip()
+        # Convert to lowercase and clean up conversational prefixes and common question words
+        q = query.lower()
+        q = re.sub(r'^(сколько|какое|какой|какая|какие|что такое|кто такой|расскажи про|найди)\s+', '', q).strip()
+        
+        # If asking about distance/speed/weight of something, extract the main subject (e.g., "луны" -> "луна")
+        q = q.replace("до луны", "луна").replace("луны", "луна")
+        
+        # Strip trailing modifiers like "в километрах", "в метрах", "весом"
+        clean_query = re.sub(r'\b(в\s+)?(километрах|метрах|граммах|килограммах|часах|минутах)\b', '', q).strip()
         if not clean_query:
             clean_query = query
             
@@ -551,7 +567,6 @@ def search_wikipedia(query):
             search_results = data.get("query", {}).get("search", [])
             if search_results:
                 page_title = search_results[0]["title"]
-                # Fetch page summary extract
                 summary_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(page_title)}"
                 sum_resp = requests.get(summary_url, headers=headers, timeout=5)
                 if sum_resp.status_code == 200:
@@ -566,28 +581,42 @@ def search_wikipedia(query):
         return "Не удалось найти информацию в Википедии."
 
 def ask_ai(prompt):
-    if AI_API_KEY == "YOUR_GEMINI_API_KEY":
-        return "Пожалуйста, настройте API ключ искусственного интеллекта в коде."
+    if GROQ_API_KEY == "gsk_YOUR_GROQ_API_KEY_HERE":
+        return "Пожалуйста, настройте API ключ Groq в коде."
     
-    client = genai.Client(api_key=AI_API_KEY)
-    max_retries = 1
-    
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",  # Using a stable standard model name
-                contents=[
-                    "Ты голосовой ассистент на умных часах. Отвечай кратко, по делу, "
-                    f"исключительно на русском языке, максимум в 1-2 предложениях. Вопрос: {prompt}"
-                ]
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            print(f"AI error (попытка {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
-                
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "qwen/qwen3.8-27b",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты голосовой ассистент на умных часах. Отвечай кратко, по делу, исключительно на русском языке, максимум в 1-2 предложениях."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 150
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            answer = data["choices"][0]["message"]["content"]
+            if answer:
+                return answer.strip()
+        else:
+            print(f"Groq HTTP error status: {response.status_code}, body: {response.text}")
+    except Exception as e:
+        print(f"Groq connection error: {e}")
+        
     print("ИИ недоступен. Перенаправляю запрос в Википедию...")
     return search_wikipedia(prompt)
 
