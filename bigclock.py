@@ -647,6 +647,10 @@ def process_command(query):
     elif any(word in command for word in ["времен", "час"]):
         current_time = time.strftime('%H:%M')
         speak_russian(f"Текущее время {current_time}")
+    elif any(word in command for word in ["обновись", "обновить"]):
+        speak_russian("Проверяю обновления на GitHub.")
+        check_for_updates()
+        speak_russian("Обновлений не найдено.")
     else:
         ai_answer = ask_ai(command)
         speak_russian(ai_answer)
@@ -714,6 +718,7 @@ root = tk.Tk()
 root.title("Smart Clock")
 root.attributes('-fullscreen', True)
 root.configure(background='black')
+root.config(cursor="none")
 
 def on_closing():
     stop_all_audio()
