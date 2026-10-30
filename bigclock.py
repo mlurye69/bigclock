@@ -8,6 +8,7 @@ import subprocess
 import os
 import re
 import json
+import sys
 import atexit
 from datetime import datetime, timedelta
 #from openai import OpenAI
@@ -476,6 +477,10 @@ GITHUB_RAW_URL = "https://raw.githubusercontent.com/mlurye69/bigclock/main/bigcl
 def check_for_updates(manual=False):
     print(f"[DEBUG] check_for_updates called with manual={manual}")
     def update_worker():
+        if manual:
+            print("[DEBUG] Waiting for intro speech to finish...")
+            time.sleep(3.0)  # Give the intro speech 3 seconds to play fully
+            
         try:
             print("[DEBUG] Sending request to GitHub...")
             response = requests.get(GITHUB_RAW_URL, timeout=10)
