@@ -9,7 +9,6 @@ import os
 import re
 import json
 import atexit
-import wikipedia
 from datetime import datetime, timedelta
 #from openai import OpenAI
 
@@ -45,7 +44,7 @@ command_list_text = (
     "• Алиса, список напоминаний\n"
     "• Алиса, обновись\n"
     "• Алиса, прочти\n"
-    "• Алиса, википедия [термин]\n"  # <-- Added here
+    "• Алиса, переведи [фраза] / как сказать [фраза]\n" # <-- Added here
     "• Алиса, напомни [текст] через [X] минут/часов\n"
     "• Алиса, напомни [текст] [дата] в [время]\n"
     "• Алиса, [ваш вопрос для ИИ]"
@@ -369,10 +368,9 @@ def turn_light_off():
     shift_position()
 
 def show_weather_screen_only(text_content, announcement_text):
-    global display_mode, weather_timer
+    global display_mode, weather_timer, countdown_seconds
     display_mode = "weather"
     
-    # Use fixed coordinates instead of relx=0.5 anchor='center'
     frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
     
     if weather_timer and weather_timer.is_alive():
@@ -384,14 +382,13 @@ def show_weather_screen_only(text_content, announcement_text):
     
     speak_russian(announcement_text)
     
-    weather_timer = threading.Timer(60.0, restore_clock_mode)
-    weather_timer.start()
+    countdown_seconds = 300
+    update_countdown_timer()
 
 def show_command_list_screen(text_content, announcement_text):
-    global display_mode, weather_timer
+    global display_mode, weather_timer, countdown_seconds
     display_mode = "weather"
     
-    # Use fixed coordinates instead of relx=0.5 anchor='center'
     frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
     
     if weather_timer and weather_timer.is_alive():
@@ -403,14 +400,13 @@ def show_command_list_screen(text_content, announcement_text):
     
     speak_russian(announcement_text)
     
-    weather_timer = threading.Timer(60.0, restore_clock_mode)
-    weather_timer.start()
+    countdown_seconds = 300
+    update_countdown_timer()
 
 def show_reminders_screen():
-    global display_mode, weather_timer
+    global display_mode, weather_timer, countdown_seconds
     display_mode = "weather"
     
-    # Use fixed coordinates instead of relx=0.5 anchor='center'
     frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
     
     if weather_timer and weather_timer.is_alive():
@@ -434,8 +430,8 @@ def show_reminders_screen():
     
     speak_russian(speech_text)
     
-    weather_timer = threading.Timer(60.0, restore_clock_mode)
-    weather_timer.start()
+    countdown_seconds = 300
+    update_countdown_timer()
 
 def restore_clock_mode():
     global display_mode
@@ -564,11 +560,14 @@ def fetch_weather():
     
     root.after(600000, fetch_weather)
 
-def speak_russian(text):
+def speak_russian(text, lang='ru'):
+    # Stop any currently playing audio immediately to prevent echoes/overlaps
+    stop_all_audio()
+    
     def speech_worker():
         try:
             from gtts import gTTS
-            tts = gTTS(text=text, lang='ru', slow=False)
+            tts = gTTS(text=text, lang=lang, slow=False)
             tts.save("response.mp3")
             global active_audio_process
             active_audio_process = subprocess.Popen(
@@ -582,44 +581,7 @@ def speak_russian(text):
         except Exception as e:
             print(f"Ошибка речи: {e}")
 
-    # Run speech in a daemon thread so it can be interrupted instantly
     threading.Thread(target=speech_worker, daemon=True).start()
-
-def search_wikipedia(query):
-    try:
-        # Convert to lowercase and clean up conversational prefixes and common question words
-        q = query.lower()
-        q = re.sub(r'^(сколько|какое|какой|какая|какие|что такое|кто такой|расскажи про|найди)\s+', '', q).strip()
-        
-        # If asking about distance/speed/weight of something, extract the main subject (e.g., "луны" -> "луна")
-        q = q.replace("до луны", "луна").replace("луны", "луна")
-        
-        # Strip trailing modifiers like "в километрах", "в метрах", "весом"
-        clean_query = re.sub(r'\b(в\s+)?(километрах|метрах|граммах|килограммах|часах|минутах)\b', '', q).strip()
-        if not clean_query:
-            clean_query = query
-            
-        url = f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
-        headers = {"User-Agent": "SmartClockBot/1.0 (personal project)"}
-        
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            search_results = data.get("query", {}).get("search", [])
-            if search_results:
-                page_title = search_results[0]["title"]
-                summary_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(page_title)}"
-                sum_resp = requests.get(summary_url, headers=headers, timeout=5)
-                if sum_resp.status_code == 200:
-                    sum_data = sum_resp.json()
-                    extract = sum_data.get("extract")
-                    if extract:
-                        return extract
-                        
-        return "Не удалось найти информацию в Википедии."
-    except Exception as e:
-        print(f"Wikipedia API error: {e}")
-        return "Не удалось найти информацию в Википедии."
 
 def ask_ai(prompt):
     if GROQ_API_KEY == "gsk_YOUR_GROQ_API_KEY_HERE":
@@ -658,8 +620,7 @@ def ask_ai(prompt):
     except Exception as e:
         print(f"Groq connection error: {e}")
         
-    print("ИИ недоступен. Перенаправляю запрос в Википедию...")
-    return search_wikipedia(prompt)
+    return "Не удалось связаться с искусственным интеллектом."
 
 def parse_alarm_time(query):
     time_match = re.search(r'(\d{1,2})[:\s](\d{2})', query)
@@ -731,6 +692,13 @@ def process_command(query):
         speak_russian("Выключаю свет.")
         turn_light_off()
         return
+    elif any(w in command for w in ["переведи", "перевести", "как сказать"]):
+        term = re.sub(r'^(переведи|перевести|как сказать)\s+', '', command).strip()
+        if term:
+            speak_russian(f"Перевожу: {term}")
+            show_translation_screen(term)
+        else:
+            speak_russian("Что именно нужно перевести?")
     elif "выход" in command:
         speak_russian("Выключаю часы.")
         stop_all_audio()
@@ -809,69 +777,182 @@ def process_command(query):
         speak_russian("Проверяю обновления на GitHub.")
         check_for_updates()
         speak_russian("Обновлений не найдено.")
-    elif any(word in command for word in ["википедия", "найди в википедии"]):
-        term = command.replace("википедия", "").replace("найди в википедии", "").strip()
-        if term:
-            speak_russian(f"Ищу в Википедии: {term}")
-            result = search_wikipedia(term)
-            speak_russian(result)
-        else:
-            speak_russian("Что именно вы хотите найти в Википедии?")
     else:
         ai_answer = ask_ai(command)
         speak_russian(ai_answer)
 
+def translate_to_english(text):
+    """Uses Groq AI to translate, provide Cyrillic pronunciation, and format the output."""
+    if GROQ_API_KEY == "gsk_YOUR_GROQ_API_KEY_HERE":
+        return "Перевод недоступен: не настроен ключ Groq."
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "qwen/qwen3.8-27b",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты переводчик. Переведи поданную русскую фразу на английский. Верни результат строго в таком формате: [Перевод на английский] | [Транслитерация английских слов русскими буквами]. Больше ничего не пиши."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            "temperature": 0.3,
+            "max_tokens": 100
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            answer = data["choices"][0]["message"]["content"].strip()
+            if "|" in answer:
+                eng, translit = answer.split("|", 1)
+                return eng.strip(), translit.strip()
+            return answer, ""
+    except Exception as e:
+        print(f"Translation error: {e}")
+    return "Ошибка перевода", ""
+
+def show_translation_screen(russian_phrase):
+    global display_mode, weather_timer, countdown_seconds
+    display_mode = "translation"
+    
+    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
+    
+    if weather_timer and weather_timer.is_alive():
+        weather_timer.cancel()
+        
+    eng_text, translit_text = translate_to_english(russian_phrase)
+    display_content = f"«{russian_phrase}»\n\nEnglish:\n{eng_text}\n\nПроизношение:\n{translit_text}"
+    
+    date_label.config(text="Перевод фразы")
+    time_label.config(text="", font=('Helvetica', 10))
+    weather_label.config(text=display_content, font=('Helvetica', 20, 'bold'), fg='white')
+    
+    # Speak the English translation with a proper English accent
+    speak_russian(eng_text, lang='en')
+    
+    # Set 5 minutes countdown (300 seconds)
+    countdown_seconds = 300
+    update_countdown_timer()
+
+def update_countdown_timer():
+    global countdown_seconds, weather_timer, display_mode
+    if display_mode == "clock":
+        return
+        
+    if countdown_seconds > 0:
+        mins = countdown_seconds // 60
+        secs = countdown_seconds % 60
+        # Append countdown to the screen title
+        current_title = date_label.cget("text").split(" (")[0]
+        date_label.config(text=f"{current_title} (Закроется через {mins:02d}:{secs:02d})")
+        countdown_seconds -= 1
+        weather_timer = threading.Timer(1.0, update_countdown_timer)
+        weather_timer.start()
+    else:
+        restore_clock_mode()
+
 def voice_listener_loop():
     time.sleep(5)  # Give PulseAudio/ALSA time to initialize on startup
     import pyaudio
+    import json
+    from vosk import Model, KaldiRecognizer
+    import audioop
+
+    # Path to your downloaded Vosk Russian model folder
+    MODEL_PATH = "/home/mlurye/vosk-model-small-ru-0.22"
     
-    CHUNK = 4096
+    if not os.path.exists(MODEL_PATH):
+        print(f"Модель Vosk не найдена по пути: {MODEL_PATH}")
+        return
+
+    try:
+        vosk_model = Model(MODEL_PATH)
+    except Exception as e:
+        print(f"Ошибка загрузки модели Vosk: {e}")
+        return
+
+    # Vosk works best with 16kHz 16-bit mono audio
+    RATE = 16000
+    CHUNK = 4000
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
-    RATE = 16000
-    RECORD_SECONDS = 8
-    
+
     p = pyaudio.PyAudio()
-    
-    print("Слушаю микрофон (непрерывная запись через PyAudio)...")
-    
+    r = sr.Recognizer()
+
+    print("Локальный сторож Vosk запущен (ожидание ключевого слова 'Алиса')...")
+
     while True:
         stream = None
         try:
+            rec = KaldiRecognizer(vosk_model, RATE)
+            rec.SetWords(False)
+
             stream = p.open(format=FORMAT,
                             channels=CHANNELS,
                             rate=RATE,
                             input=True,
                             frames_per_buffer=CHUNK)
-            
-            frames = []
-            total_chunks = int((RATE / CHUNK) * RECORD_SECONDS)
-            
-            for _ in range(total_chunks):
-                data = stream.read(CHUNK)
-                if data:
-                    frames.append(data)
+
+            # Step 1: Listen locally until "алиса" is recognized in the live stream
+            while True:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                if not data:
+                    continue
                 
+                if rec.AcceptWaveform(data):
+                    result = json.loads(rec.Result())
+                    text = result.get("text", "").lower()
+                    if "алиса" in text or "alisa" in text:
+                        print("Ключевое слово обнаружено локально через Vosk!")
+                        speak_russian("Слушаю.")
+                        break
+
+            # Step 2: Wake word detected, now record command until a 3-second pause
+            frames = []
+            silent_chunks = 0
+            chunks_per_second = RATE / CHUNK
+            silence_threshold_chunks = int(chunks_per_second * 3)
+
+            while True:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                if not data:
+                    break
+                frames.append(data)
+
+                # Measure volume/energy to detect speech pauses
+                rms = audioop.rms(data, 2)
+                if rms < 300:  # Adjust threshold based on your microphone background noise
+                    silent_chunks += 1
+                else:
+                    silent_chunks = 0  # Reset if sound/speech is detected
+
+                # Stop recording if silence lasts for 3 seconds
+                if silent_chunks > silence_threshold_chunks:
+                    break
+
             stream.stop_stream()
             stream.close()
             stream = None
-            
-            if not frames:
-                continue
-                
-            audio_data = sr.AudioData(b''.join(frames), RATE, 2)
-            
-            r = sr.Recognizer()
-            query = r.recognize_google(audio_data, language="ru-RU").lower()
-            process_command(query)
-            
+
+            # Step 3: Send only the final captured command audio off-device for text transcription
+            if frames:
+                complete_audio = sr.AudioData(b''.join(frames), RATE, 2)
+                query = r.recognize_google(complete_audio, language="ru-RU").lower()
+                process_command("алиса " + query)
+
         except sr.UnknownValueError:
-            pass
-        except sr.RequestError as e:
-            print(f"Ошибка сервиса распознавания речи: {e}")
-            time.sleep(2)
+            print("Не удалось разобрать фразу.")
+            speak_russian("Не расслышала команду. Повторите, пожалуйста.")
         except Exception as e:
-            print(f"Ошибка аудиопотока: {e}")
+            print(f"Ошибка аудиопотока Vosk: {e}")
             if stream:
                 try:
                     stream.stop_stream()
