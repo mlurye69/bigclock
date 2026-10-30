@@ -11,26 +11,20 @@ import json
 import sys
 import atexit
 from datetime import datetime, timedelta
-#from openai import OpenAI
 
+#Groq URL  https://console.groq.com/
 # Replace with your Groq API key
 GROQ_API_KEY = "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"
-
 
 # --- CONFIGURATION ---
 WEATHER_API_KEY = "f104c4b8251a042efaca44820f294ae8"  # OpenWeatherMap API key
 
-#from google import genai
-#AI_API_KEY = "AQ.Ab8RN6K9ReO1Kc-dgXHHuSEsUUIBA-qOBE4MeF9obMSJUNwEhQ"  # Put your Google AI Studio API key here
-
-#Groq URL  https://console.groq.com/
-#Groq API Key "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"
-
-# Path to your custom MP3 alarm sound file
-CHIME_SOUND_PATH = "/home/mlurye/Sounds/alarm-clock-1.mp3"
 # Save reminders.json in the same folder where bigclock.py is stored
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REMINDERS_FILE = os.path.join(SCRIPT_DIR, "reminders.json")
+
+# Path to your custom MP3 alarm sound file
+CHIME_SOUND_PATH = os.path.join(SCRIPT_DIR, "Sounds", "alarm-clock-1.mp3")
 
 command_list_text = (
     "Доступные голосовые команды:\n"
