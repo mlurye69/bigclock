@@ -473,24 +473,47 @@ def trigger_alarm():
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/mlurye69/bigclock/main/bigclock.py"
 
-def check_for_updates():
-    try:
-        response = requests.get(GITHUB_RAW_URL, timeout=10)
-        if response.status_code == 200:
-            remote_code = response.text
-            script_path = os.path.abspath(__file__)
+def check_for_updates(manual=False):
+    print(f"[DEBUG] check_for_updates called with manual={manual}")
+    def update_worker():
+        try:
+            print("[DEBUG] Sending request to GitHub...")
+            response = requests.get(GITHUB_RAW_URL, timeout=10)
+            print(f"[DEBUG] GitHub response status: {response.status_code}")
             
-            with open(script_path, "r", encoding="utf-8") as f:
-                local_code = f.read()
+            if response.status_code == 200:
+                remote_code = response.text
+                script_path = os.path.abspath(__file__)
                 
-            if remote_code.strip() != local_code.strip():
-                print("Обнаружено обновление на GitHub. Применяю...")
-                with open(script_path, "w", encoding="utf-8") as f:
-                    f.write(remote_code)
-                speak_russian("Обновление загружено. Перезапускаю часы.")
-                os.execv(sys.executable, ['python'] + sys.argv)
-    except Exception as e:
-        print(f"Ошибка проверки обновлений: {e}")
+                with open(script_path, "r", encoding="utf-8") as f:
+                    local_code = f.read()
+                    
+                if remote_code.strip() != local_code.strip():
+                    print("[DEBUG] Update found! Applying...")
+                    with open(script_path, "w", encoding="utf-8") as f:
+                        f.write(remote_code)
+                    speak_russian("Обновление загружено. Перезапускаю часы.")
+                    time.sleep(3.0)
+                    os.execv(sys.executable, ['python'] + sys.argv)
+                else:
+                    print("[DEBUG] No updates found.")
+                    if manual:
+                        print("[DEBUG] Speaking: Обновлений не найдено.")
+                        speak_russian("Обновлений не найдено.")
+            else:
+                print(f"[DEBUG] Bad HTTP status from GitHub: {response.status_code}")
+                if manual:
+                    speak_russian("Не удалось получить ответ от сервера.")
+        except Exception as e:
+            print(f"[DEBUG] Exception in update_worker: {e}")
+            if manual:
+                speak_russian("Ошибка соединения с сетью.")
+
+    if manual:
+        print("[DEBUG] Manual check requested, speaking intro...")
+        speak_russian("Проверяю обновления на GitHub.")
+        
+    threading.Thread(target=update_worker, daemon=True).start()
 
 def fetch_weather():
     global current_weather_text, tomorrow_hourly_forecast, weekly_forecast_text, today_hourly_forecast
@@ -561,26 +584,45 @@ def fetch_weather():
     root.after(600000, fetch_weather)
 
 def speak_russian(text, lang='ru'):
-    # Stop any currently playing audio immediately to prevent echoes/overlaps
-    stop_all_audio()
+    global active_audio_process
     
+    # 1. Instantly kill any currently playing audio process
+    if active_audio_process:
+        try:
+            active_audio_process.terminate()
+            active_audio_process.kill()
+            active_audio_process.wait(timeout=0.2)
+        except Exception:
+            pass
+        active_audio_process = None
+
+    # 2. Force-kill any lingering system audio players to guarantee no overlap
+    os.system("pkill -9 mpg123 2>/dev/null")
+    os.system("pkill -9 play 2>/dev/null")
+    os.system("pkill -9 aplay 2>/dev/null")
+    os.system("pkill -9 paplay 2>/dev/null")
+
     def speech_worker():
         try:
             from gtts import gTTS
             tts = gTTS(text=text, lang=lang, slow=False)
             tts.save("response.mp3")
+            
             global active_audio_process
             active_audio_process = subprocess.Popen(
                 ["mpg123", "-q", "response.mp3"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             active_audio_process.wait()
+            
             if os.path.exists("response.mp3"):
                 os.remove("response.mp3")
             active_audio_process = None
         except Exception as e:
             print(f"Ошибка речи: {e}")
 
+    # Small pause to let audio devices release the lock
+    time.sleep(0.1)
     threading.Thread(target=speech_worker, daemon=True).start()
 
 def ask_ai(prompt):
@@ -775,8 +817,7 @@ def process_command(query):
         speak_russian(f"Текущее время {current_time}")
     elif any(word in command for word in ["обновись", "обновить"]):
         speak_russian("Проверяю обновления на GitHub.")
-        check_for_updates()
-        speak_russian("Обновлений не найдено.")
+        check_for_updates(manual=True)
     else:
         ai_answer = ask_ai(command)
         speak_russian(ai_answer)
@@ -996,6 +1037,8 @@ restore_pending_reminders()
 voice_thread = threading.Thread(target=voice_listener_loop, daemon=True)
 voice_thread.start()
 
-# Add this right before root.mainloop()
-root.after(5000, check_for_updates)
+def delayed_update_check():
+    check_for_updates(manual=False)
+
+root.after(5000, delayed_update_check)
 root.mainloop()
