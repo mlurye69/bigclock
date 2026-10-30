@@ -478,8 +478,9 @@ def check_for_updates(manual=False):
     print(f"[DEBUG] check_for_updates called with manual={manual}")
     def update_worker():
         if manual:
-            print("[DEBUG] Waiting for intro speech to finish...")
-            time.sleep(3.0)  # Give the intro speech 3 seconds to play fully
+            print("[DEBUG] Speaking intro...")
+            speak_russian("Проверяю обновления на GitHub.")
+            time.sleep(3.5)  # Wait for intro to finish fully
             
         try:
             print("[DEBUG] Sending request to GitHub...")
@@ -514,10 +515,6 @@ def check_for_updates(manual=False):
             if manual:
                 speak_russian("Ошибка соединения с сетью.")
 
-    if manual:
-        print("[DEBUG] Manual check requested, speaking intro...")
-        speak_russian("Проверяю обновления на GitHub.")
-        
     threading.Thread(target=update_worker, daemon=True).start()
 
 def fetch_weather():
@@ -821,7 +818,6 @@ def process_command(query):
         current_time = time.strftime('%H:%M')
         speak_russian(f"Текущее время {current_time}")
     elif any(word in command for word in ["обновись", "обновить"]):
-        speak_russian("Проверяю обновления на GitHub.")
         check_for_updates(manual=True)
     else:
         ai_answer = ask_ai(command)
