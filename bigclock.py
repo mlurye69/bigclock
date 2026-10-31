@@ -12,18 +12,34 @@ import sys
 import atexit
 from datetime import datetime, timedelta
 
-#Groq URL  https://console.groq.com/
-# Replace with your Groq API key
-GROQ_API_KEY = "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"
-
-# --- CONFIGURATION ---
-WEATHER_API_KEY = "f104c4b8251a042efaca44820f294ae8"  # OpenWeatherMap API key
-
-# Save reminders.json in the same folder where bigclock.py is stored
+# --- LOAD CONFIGURATION FROM JSON ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REMINDERS_FILE = os.path.join(SCRIPT_DIR, "reminders.json")
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "big_clock.json")
 
-# Path to your custom MP3 alarm sound file
+def load_config():
+    default_config = {
+        "GROQ_API_KEY": "gsk_YOUR_GROQ_API_KEY_HERE",
+        "WEATHER_API_KEY": "YOUR_WEATHER_API_KEY",
+        "CITY": "Boston",
+        "VOSK_MODEL_PATH": os.path.join(SCRIPT_DIR, "vosk-model-small-ru-0.22")
+    }
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                default_config.update(loaded)
+        except Exception as e:
+            print(f"Ошибка чтения big_clock.json: {e}")
+    return default_config
+
+config = load_config()
+
+GROQ_API_KEY = config.get("GROQ_API_KEY")
+WEATHER_API_KEY = config.get("WEATHER_API_KEY")
+CITY = config.get("CITY")
+MODEL_PATH = config.get("VOSK_MODEL_PATH")
+
+REMINDERS_FILE = os.path.join(SCRIPT_DIR, "reminders.json")
 CHIME_SOUND_PATH = os.path.join(SCRIPT_DIR, "Sounds", "alarm-clock-1.mp3")
 
 command_list_text = (
@@ -598,28 +614,28 @@ def speak_russian(text, lang='ru'):
     os.system("pkill -9 aplay 2>/dev/null")
     os.system("pkill -9 paplay 2>/dev/null")
 
-    def speech_worker():
-        try:
-            from gtts import gTTS
-            tts = gTTS(text=text, lang=lang, slow=False)
-            tts.save("response.mp3")
-            
-            global active_audio_process
-            active_audio_process = subprocess.Popen(
-                ["mpg123", "-q", "response.mp3"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            active_audio_process.wait()
-            
-            if os.path.exists("response.mp3"):
-                os.remove("response.mp3")
-            active_audio_process = None
-        except Exception as e:
-            print(f"Ошибка речи: {e}")
-
-    # Small pause to let audio devices release the lock
-    time.sleep(0.1)
-    threading.Thread(target=speech_worker, daemon=True).start()
+def speech_worker(text, lang):
+    try:
+        from gtts import gTTS
+        
+        # Define absolute path in the script directory
+        audio_file = os.path.join(SCRIPT_DIR, "response.mp3")
+        
+        tts = gTTS(text=text, lang=lang, slow=False)
+        tts.save(audio_file)
+        
+        global active_audio_process
+        active_audio_process = subprocess.Popen(
+            ["mpg123", "-q", audio_file],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        active_audio_process.wait()
+        
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+        active_audio_process = None
+    except Exception as e:
+        print(f"Ошибка речи: {e}")
 
 def ask_ai(prompt):
     if GROQ_API_KEY == "gsk_YOUR_GROQ_API_KEY_HERE":
