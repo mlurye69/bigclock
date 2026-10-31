@@ -12,37 +12,20 @@ import sys
 import atexit
 from datetime import datetime, timedelta
 
-# --- LOAD CONFIGURATION FROM JSON ---
+# --- PATH SETUP ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "big_clock.json")
-
-def load_config():
-    default_config = {
-        "GROQ_API_KEY": "gsk_YOUR_GROQ_API_KEY_HERE",
-        "WEATHER_API_KEY": "YOUR_WEATHER_API_KEY",
-        "CITY": "Boston",
-        "VOSK_MODEL_PATH": os.path.join(SCRIPT_DIR, "vosk-model-small-ru-0.22")
-    }
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                default_config.update(loaded)
-        except Exception as e:
-            print(f"Ошибка чтения big_clock.json: {e}")
-    return default_config
-
-config = load_config()
-
-GROQ_API_KEY = config.get("GROQ_API_KEY")
-WEATHER_API_KEY = config.get("WEATHER_API_KEY")
-CITY = config.get("CITY")
-MODEL_PATH = config.get("VOSK_MODEL_PATH")
-
 REMINDERS_FILE = os.path.join(SCRIPT_DIR, "reminders.json")
 CHIME_SOUND_PATH = os.path.join(SCRIPT_DIR, "Sounds", "alarm-clock-1.mp3")
 
-command_list_text = (
+MONTHS_RU = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+    "январь": 1, "февраль": 2, "март": 3, "апрель": 4, "май": 5, "июнь": 6,
+    "июль": 7, "август": 8, "сентябрь": 9, "октябрь": 10, "ноябрь": 11, "декабрь": 12
+}
+
+COMMAND_LIST_TEXT = (
     "Доступные голосовые команды:\n"
     "• Алиса, погода / сегодня / завтра / неделя\n"
     "• Алиса, который час\n"
@@ -55,1001 +38,434 @@ command_list_text = (
     "• Алиса, список напоминаний\n"
     "• Алиса, обновись\n"
     "• Алиса, прочти\n"
-    "• Алиса, переведи [фраза] / как сказать [фраза]\n" # <-- Added here
+    "• Алиса, переведи [фраза] / как сказать [фраза]\n"
     "• Алиса, напомни [текст] через [X] минут/часов\n"
     "• Алиса, напомни [текст] [дата] в [время]\n"
     "• Алиса, [ваш вопрос для ИИ]"
 )
 
-MONTHS_RU = {
-    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
-    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
-    "январь": 1, "февраль": 2, "март": 3, "апрель": 4, "май": 5, "июнь": 6,
-    "июль": 7, "август": 8, "сентябрь": 9, "октябрь": 10, "ноябрь": 11, "декабрь": 12
-}
 
-def get_city_by_ip():
-    try:
-        response = requests.get("https://ipinfo.io/json", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            city = data.get("city")
-            if city:
-                print(f"Город успешно определен по IP: {city}")
-                return city
-    except Exception as e:
-        print(f"Не удалось определить город по IP: {e}")
-    return "Boston"
+class BigClockApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Smart Clock")
+        self.root.attributes('-fullscreen', True)
+        self.root.configure(background='black')
+        self.root.config(cursor="none")
 
-CITY = get_city_by_ip()
-# ---------------------
+        self.load_config()
+        
+        # State variables
+        self.current_weather_text = "Погода еще не загружена"
+        self.today_hourly_forecast = "Почасовой прогноз на сегодня загружается..."
+        self.tomorrow_hourly_forecast = "Почасовой прогноз на завтра загружается..."
+        self.weekly_forecast_text = "Прогноз на неделю загружается..."
 
-current_weather_text = "Погода еще не загружена"
-today_hourly_forecast = "Почасовой прогноз на сегодня загружается..."
-tomorrow_hourly_forecast = "Почасовой прогноз на завтра загружается..."
-weekly_forecast_text = "Прогноз на неделю загружается..."
+        self.alarm_time = None
+        self.alarm_triggered_today = False
+        self.alarm_active = False
+        self.alarm_stop_event = threading.Event()
+        self.active_audio_process = None
 
-alarm_time = None
-alarm_triggered_today = False
-alarm_active = False
-alarm_stop_event = threading.Event()
-active_audio_process = None
+        self.display_mode = "clock"
+        self.light_timer = None
+        self.weather_timer = None
+        self.countdown_seconds = 0
 
-display_mode = "clock"
-light_timer = None
-weather_timer = None
+        self.reminders = []
+        self.load_reminders()
 
-def stop_all_audio():
-    global alarm_active, active_audio_process
-    alarm_active = False
-    alarm_stop_event.set()
-    if active_audio_process:
+        self.setup_ui()
+        
+        # Register exit handler
+        atexit.register(self.stop_all_audio)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.bind('<Escape>', lambda e: self.on_closing())
+
+        # Start background tasks
+        self.update_display()
+        self.fetch_weather()
+        self.shift_position()
+        self.restore_pending_reminders()
+
+        threading.Thread(target=self.voice_listener_loop, daemon=True).start()
+        self.root.after(5000, lambda: self.check_for_updates(manual=False))
+
+    def load_config(self):
+        default_config = {
+            "GROQ_API_KEY": "gsk_YOUR_GROQ_API_KEY_HERE",
+            "WEATHER_API_KEY": "YOUR_WEATHER_API_KEY",
+            "CITY": self.get_city_by_ip(),
+            "VOSK_MODEL_PATH": os.path.join(SCRIPT_DIR, "vosk-model-small-ru-0.22"),
+            "GITHUB_RAW_URL": "https://raw.githubusercontent.com/mlurye69/bigclock/main/bigclock.py"
+        }
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    default_config.update(loaded)
+            except Exception as e:
+                print(f"Ошибка чтения big_clock.json: {e}")
+        
+        self.groq_api_key = default_config["GROQ_API_KEY"]
+        self.weather_api_key = default_config["WEATHER_API_KEY"]
+        self.city = default_config["CITY"]
+        self.model_path = default_config["VOSK_MODEL_PATH"]
+        self.github_raw_url = default_config["GITHUB_RAW_URL"]
+
+    def load_reminders(self):
+        if os.path.exists(REMINDERS_FILE):
+            try:
+                with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
+                    self.reminders = json.load(f)
+            except Exception as e:
+                print(f"Ошибка загрузки reminders.json: {e}")
+                self.reminders = []
+
+    def save_reminders(self):
         try:
-            active_audio_process.terminate()
-            active_audio_process.kill()
-        except Exception:
-            pass
-        active_audio_process = None
-    os.system("pkill -9 play 2>/dev/null")
-    os.system("pkill -9 mpg123 2>/dev/null")
-    os.system("pkill -9 aplay 2>/dev/null")
-    os.system("pkill -9 paplay 2>/dev/null")
+            with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.reminders, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"Ошибка сохранения reminders.json: {e}")
 
-atexit.register(stop_all_audio)
+    def restore_pending_reminders(self):
+        now = datetime.now().timestamp()
+        valid_reminders = []
+        for rem in self.reminders:
+            target_time = rem.get("timestamp", 0)
+            if target_time > now:
+                valid_reminders.append(rem)
+                delay = target_time - now
+                threading.Timer(delay, self.trigger_reminder, args=[rem["text"]]).start()
+        self.reminders = valid_reminders
+        self.save_reminders()
 
-def load_reminders_from_disk():
-    if not os.path.exists(REMINDERS_FILE):
-        return []
-    try:
-        with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Ошибка чтения reminders.json: {e}")
-        return []
-
-def save_reminders_to_disk(reminders):
-    try:
-        with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(reminders, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"Ошибка записи reminders.json: {e}")
-
-def add_reminder_to_storage(text, target_timestamp, reminder_type="one-time"):
-    reminders = load_reminders_from_disk()
-    reminders.append({
-        "text": text, 
-        "target_timestamp": target_timestamp,
-        "type": reminder_type
-    })
-    save_reminders_to_disk(reminders)
-
-def remove_reminder_from_storage(target_timestamp, text):
-    reminders = load_reminders_from_disk()
-    reminders = [r for r in reminders if not (r["text"] == text and r["target_timestamp"] == target_timestamp)]
-    save_reminders_to_disk(reminders)
-
-def update_daily_reminder_in_storage(old_timestamp, new_timestamp, text):
-    reminders = load_reminders_from_disk()
-    for r in reminders:
-        if r["text"] == text and r["target_timestamp"] == old_timestamp:
-            r["target_timestamp"] = new_timestamp
-            break
-    save_reminders_to_disk(reminders)
-
-def schedule_reminder_thread(delay, text, target_timestamp, reminder_type):
-    def reminder_job():
-        time.sleep(max(0, delay))
-        speak_russian(f"Напоминание: {text}")
+    def add_reminder(self, text, delay_seconds):
+        target_time = datetime.now().timestamp() + delay_seconds
+        reminder = {"text": text, "timestamp": target_time}
+        self.reminders.append(reminder)
+        self.save_reminders()
         
-        if reminder_type == "daily":
-            next_timestamp = target_timestamp + 86400
-            update_daily_reminder_in_storage(target_timestamp, next_timestamp, text)
-            schedule_reminder_thread(86400, text, next_timestamp, "daily")
-        else:
-            remove_reminder_from_storage(target_timestamp, text)
+        threading.Timer(delay_seconds, self.trigger_reminder, args=[text]).start()
+        self.speak_russian(f"Напоминание установлено.")
 
-    threading.Thread(target=reminder_job, daemon=True).start()
+    def trigger_reminder(self, text):
+        self.speak_russian(f"Напоминание: {text}")
+        self.reminders = [r for r in self.reminders if r["text"] != text]
+        self.save_reminders()
 
-def set_reminder(reminder_text, delay_seconds, reminder_type="one-time"):
-    target_timestamp = time.time() + delay_seconds
-    add_reminder_to_storage(reminder_text, target_timestamp, reminder_type)
-    if reminder_type == "one-time":
-        speak_russian("Напоминание установлено.")
-    schedule_reminder_thread(delay_seconds, reminder_text, target_timestamp, reminder_type)
-
-def schedule_advanced_reminder(reminder_text, event_datetime):
-    """
-    Schedules:
-    1. Day before at 21:10
-    2. Day of event at 9:10
-    3. Exact event time
-    """
-    now = datetime.now()
-    event_timestamp = event_datetime.timestamp()
-    
-    # 1. Day before at 21:10
-    day_before = event_datetime - timedelta(days=1)
-    day_before_dt = day_before.replace(hour=21, minute=10, second=0, microsecond=0)
-    if day_before_dt > now:
-        delay_1 = (day_before_dt - now).total_seconds()
-        text_1 = f"Накануне: {reminder_text}"
-        add_reminder_to_storage(text_1, day_before_dt.timestamp(), "advanced-pre")
-        schedule_reminder_thread(delay_1, text_1, day_before_dt.timestamp(), "one-time")
-
-    # 2. Day of event at 9:10
-    day_of_dt = event_datetime.replace(hour=9, minute=10, second=0, microsecond=0)
-    if day_of_dt > now:
-        delay_2 = (day_of_dt - now).total_seconds()
-        text_2 = f"Сегодня: {reminder_text}"
-        add_reminder_to_storage(text_2, day_of_dt.timestamp(), "advanced-pre")
-        schedule_reminder_thread(delay_2, text_2, day_of_dt.timestamp(), "one-time")
-
-    # 3. Exact event time
-    delay_event = (event_datetime - now).total_seconds()
-    if delay_event > 0:
-        add_reminder_to_storage(reminder_text, event_timestamp, "advanced-event")
-        schedule_reminder_thread(delay_event, reminder_text, event_timestamp, "one-time")
-        
-    speak_russian("Расширенное напоминание установлено.")
-
-def parse_date_time_reminder(query):
-    """
-    Parses queries like: 'напомни визит к врачу 12 ноября в 10:15'
-    """
-    # Extract time
-    time_match = re.search(r'(?:в\s+)?(\d{1,2})[:\s](\d{2})', query)
-    hour, minute = 10, 0
-    if time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2))
-
-    # Extract day and month
-    now = datetime.now()
-    target_day = now.day
-    target_month = now.month
-    
-    day_match = re.search(r'\b(\d{1,2})\b', query)
-    if day_match:
-        potential_day = int(day_match.group(1))
-        if 1 <= potential_day <= 31:
-            target_day = potential_day
-
-    for month_name, m_num in MONTHS_RU.items():
-        if month_name in query:
-            target_month = m_num
-            break
-
-    try:
-        target_dt = datetime(now.year, target_month, target_day, hour, minute, 0)
-        if target_dt < now:
-            # If date has passed this year, assume next year
-            target_dt = datetime(now.year + 1, target_month, target_day, hour, minute, 0)
-        return target_dt
-    except Exception as e:
-        print(f"Date parse error: {e}")
-        return None
-
-def setup_default_daily_reminders():
-    reminders = load_reminders_from_disk()
-    pill_text = "Пожалуйста, возьмите ваши таблетки"
-    target_times = [("09", "10"), ("21", "10")]
-    now = datetime.now()
-    
-    for hour_str, min_str in target_times:
-        hour = int(hour_str)
-        minute = int(min_str)
-        
-        exists = any(r.get("type") == "daily" and r["text"] == pill_text and 
-                     datetime.fromtimestamp(r["target_timestamp"]).strftime('%H:%M') == f"{hour_str}:{min_str}" 
-                     for r in reminders)
-        
-        if not exists:
-            target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target_dt <= now:
-                target_dt += timedelta(days=1)
-            
-            target_timestamp = target_dt.timestamp()
-            add_reminder_to_storage(pill_text, target_timestamp, "daily")
-
-def restore_pending_reminders():
-    setup_default_daily_reminders()
-    reminders = load_reminders_from_disk()
-    now = time.time()
-    remaining_reminders = []
-    
-    for r in reminders:
-        text = r["text"]
-        target_timestamp = r["target_timestamp"]
-        rem_type = r.get("type", "one-time")
-        delay = target_timestamp - now
-        
-        if delay > 0:
-            remaining_reminders.append(r)
-            schedule_reminder_thread(delay, text, target_timestamp, rem_type)
-        else:
-            if rem_type == "daily":
-                while target_timestamp <= now:
-                    target_timestamp += 86400
-                r["target_timestamp"] = target_timestamp
-                remaining_reminders.append(r)
-                new_delay = target_timestamp - now
-                schedule_reminder_thread(new_delay, text, target_timestamp, "daily")
-            else:
-                # Skip expired one-time/advanced items or report them
-                pass
-                
-    save_reminders_to_disk(remaining_reminders)
-
-def update_display():
-    global alarm_time, alarm_triggered_today, display_mode
-    
-    if display_mode == "clock":
-        days_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
-        months_ru = ["", "Января", "Февраля", "Марта", "Апреля", "Мая", "Июня", "Июля", "Августа", "Сентября", "Октября", "Ноября", "Декабря"]
-        
-        t = time.localtime()
-        day_name = days_ru[t.tm_wday]
-        day_num = t.tm_mday
-        month_name = months_ru[t.tm_mon]
-        
-        date_str = f"{day_name}, {day_num} {month_name}"
-        time_str = time.strftime('%H:%M:%S')
-        current_hm = time.strftime('%H:%M')
-        
-        date_label.config(text=date_str)
-        time_label.config(text=time_str, font=('Helvetica', 110, 'bold'))
-        
-        formatted_weather = f"Погода в {CITY}: {current_weather_text}"
-        weather_label.config(text=formatted_weather, font=('Helvetica', 28, 'bold'), fg='lightseagreen')
-        
-        if alarm_time and current_hm == alarm_time and not alarm_triggered_today:
-            alarm_triggered_today = True
-            threading.Thread(target=trigger_alarm, daemon=True).start()
-        elif current_hm != alarm_time:
-            alarm_triggered_today = False
-            
-    root.after(100, update_display)
-
-def shift_position():
-    if display_mode == "clock":  # Only shift if we are in normal clock mode
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        
-        max_x = max(50, screen_width - 650)
-        max_y = max(50, screen_height - 400)
-        
-        new_x = random.randint(40, max_x)
-        new_y = random.randint(40, max_y)
-        
-        frame.place(x=new_x, y=new_y, relwidth=0.9, relheight=0.9, anchor='nw')
-        
-    root.after(30000, shift_position)
-
-def turn_light_on():
-    global display_mode, light_timer
-    display_mode = "light"
-    
-    # Cancel any active timers
-    if light_timer and light_timer.is_alive():
-        light_timer.cancel()
-        
-    # Hide the main clock frame so it doesn't interfere
-    frame.place_forget()
-    
-    # Turn the entire root window background white
-    root.configure(background='white')
-    
-    # Auto-revert back after 10 minutes (600 seconds)
-    light_timer = threading.Timer(600.0, turn_light_off)
-    light_timer.start()
-
-def turn_light_off():
-    global display_mode, light_timer
-    if light_timer and light_timer.is_alive():
-        light_timer.cancel()
-        
-    display_mode = "clock"
-    
-    # Restore root window background to black
-    root.configure(background='black')
-    
-    # Put the clock frame back in its normal position
-    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
-    
-    shift_position()
-
-def show_weather_screen_only(text_content, announcement_text):
-    global display_mode, weather_timer, countdown_seconds
-    display_mode = "weather"
-    
-    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
-    
-    if weather_timer and weather_timer.is_alive():
-        weather_timer.cancel()
-        
-    date_label.config(text=f"Прогноз погоды ({CITY})")
-    time_label.config(text="", font=('Helvetica', 10))
-    weather_label.config(text=text_content, font=('Helvetica', 22, 'bold'), fg='white')
-    
-    speak_russian(announcement_text)
-    
-    countdown_seconds = 300
-    update_countdown_timer()
-
-def show_command_list_screen(text_content, announcement_text):
-    global display_mode, weather_timer, countdown_seconds
-    display_mode = "weather"
-    
-    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
-    
-    if weather_timer and weather_timer.is_alive():
-        weather_timer.cancel()
-        
-    date_label.config(text="Справочник команд")
-    time_label.config(text="", font=('Helvetica', 10))
-    weather_label.config(text=text_content, font=('Helvetica', 20, 'bold'), fg='white')
-    
-    speak_russian(announcement_text)
-    
-    countdown_seconds = 300
-    update_countdown_timer()
-
-def show_reminders_screen():
-    global display_mode, weather_timer, countdown_seconds
-    display_mode = "weather"
-    
-    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
-    
-    if weather_timer and weather_timer.is_alive():
-        weather_timer.cancel()
-        
-    reminders = load_reminders_from_disk()
-    if not reminders:
-        reminders_text = "Активных напоминаний нет."
-        speech_text = "У вас нет активных напоминаний."
-    else:
-        lines = []
-        for i, r in enumerate(reminders, 1):
-            dt_str = datetime.fromtimestamp(r["target_timestamp"]).strftime('%d.%m.%Y в %H:%M')
-            lines.append(f"{i}. {r['text']} ({dt_str})")
-        reminders_text = "\n".join(lines)
-        speech_text = f"У вас найдено активных напоминаний: {len(reminders)}"
-        
-    date_label.config(text="Список напоминаний")
-    time_label.config(text="", font=('Helvetica', 10))
-    weather_label.config(text=reminders_text, font=('Helvetica', 20, 'bold'), fg='white')
-    
-    speak_russian(speech_text)
-    
-    countdown_seconds = 300
-    update_countdown_timer()
-
-def restore_clock_mode():
-    global display_mode
-    display_mode = "clock"
-    # Reset back to a stable position before regular shifting kicks back in
-    frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9, anchor='nw')
-
-def trigger_alarm():
-    global alarm_active, active_audio_process, alarm_time
-    alarm_active = True
-    alarm_stop_event.clear()
-    
-    for repetition in range(2):
-        if not alarm_active or alarm_stop_event.is_set():
-            break
-            
+    def get_city_by_ip(self):
         try:
-            if os.path.exists(CHIME_SOUND_PATH):
-                active_audio_process = subprocess.Popen(
-                    ["mpg123", "-q", CHIME_SOUND_PATH],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            else:
-                active_audio_process = subprocess.Popen(
-                    ["play", "-q", "-n", "synth", "0.3", "bell", "523"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            active_audio_process.wait()
-        except Exception:
-            pass
-            
-        for _ in range(50):
-            if not alarm_active or alarm_stop_event.is_set():
-                break
-            time.sleep(0.1)
-            
-    alarm_active = False
-    alarm_time = None
-
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/mlurye69/bigclock/main/bigclock.py"
-
-def check_for_updates(manual=False):
-    print(f"[DEBUG] check_for_updates called with manual={manual}")
-    def update_worker():
-        if manual:
-            print("[DEBUG] Speaking intro...")
-            speak_russian("Проверяю обновления на GitHub.")
-            time.sleep(3.5)  # Wait for intro to finish fully
-            
-        try:
-            print("[DEBUG] Sending request to GitHub...")
-            response = requests.get(GITHUB_RAW_URL, timeout=10)
-            print(f"[DEBUG] GitHub response status: {response.status_code}")
-            
+            response = requests.get("https://ipinfo.io/json", timeout=5)
             if response.status_code == 200:
-                remote_code = response.text
-                script_path = os.path.abspath(__file__)
-                
-                with open(script_path, "r", encoding="utf-8") as f:
-                    local_code = f.read()
-                    
-                if remote_code.strip() != local_code.strip():
-                    print("[DEBUG] Update found! Applying...")
-                    with open(script_path, "w", encoding="utf-8") as f:
-                        f.write(remote_code)
-                    speak_russian("Обновление загружено. Перезапускаю часы.")
-                    time.sleep(3.0)
-                    os.execv(sys.executable, ['python'] + sys.argv)
-                else:
-                    print("[DEBUG] No updates found.")
-                    if manual:
-                        print("[DEBUG] Speaking: Обновлений не найдено.")
-                        speak_russian("Обновлений не найдено.")
-            else:
-                print(f"[DEBUG] Bad HTTP status from GitHub: {response.status_code}")
-                if manual:
-                    speak_russian("Не удалось получить ответ от сервера.")
+                city = response.json().get("city")
+                if city:
+                    return city
         except Exception as e:
-            print(f"[DEBUG] Exception in update_worker: {e}")
-            if manual:
-                speak_russian("Ошибка соединения с сетью.")
+            print(f"Не удалось определить город по IP: {e}")
+        return "Boston"
 
-    threading.Thread(target=update_worker, daemon=True).start()
+    def setup_ui(self):
+        self.frame = tk.Frame(self.root, bg='black')
+        self.frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9)
 
-def fetch_weather():
-    global current_weather_text, tomorrow_hourly_forecast, weekly_forecast_text, today_hourly_forecast
-    if WEATHER_API_KEY != "YOUR_WEATHER_API_KEY":
-        try:
-            url_current = f"https://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-            resp_curr = requests.get(url_current, timeout=10)
-            if resp_curr.status_code == 200:
-                data = resp_curr.json()
-                temp = round(data["main"]["temp"])
-                desc = data["weather"][0]["description"].capitalize()
-                current_weather_text = f"{desc}, {temp}°C"
+        self.weather_label = tk.Label(self.frame, font=('Helvetica', 22, 'bold'), fg='lightseagreen', bg='black', justify='left', anchor='w')
+        self.weather_label.pack(anchor='w', pady=(0, 10))
 
-            url_forecast = f"https://api.openweathermap.org/data/2.5/forecast?q={CITY}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-            resp_fore = requests.get(url_forecast, timeout=10)
-            if resp_fore.status_code == 200:
-                fdata = resp_fore.json()
-                today_date = datetime.now().strftime('%Y-%m-%d')
-                tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        self.date_label = tk.Label(self.frame, font=('Helvetica', 32, 'bold'), fg='mediumseagreen', bg='black', anchor='w')
+        self.date_label.pack(anchor='w', pady=(0, 15))
+
+        self.time_label = tk.Label(self.frame, font=('Helvetica', 110, 'bold'), fg='mediumseagreen', bg='black', anchor='w')
+        self.time_label.pack(anchor='w', pady=(0, 0))
+
+    def stop_all_audio(self):
+        self.alarm_active = False
+        self.alarm_stop_event.set()
+        if self.active_audio_process:
+            try:
+                self.active_audio_process.terminate()
+                self.active_audio_process.wait(timeout=0.5)
+            except Exception:
+                try:
+                    self.active_audio_process.kill()
+                except Exception:
+                    pass
+            self.active_audio_process = None
+
+    def speak_russian(self, text, lang='ru'):
+        if self.active_audio_process:
+            try:
+                self.active_audio_process.terminate()
+                self.active_audio_process.kill()
+                self.active_audio_process.wait(timeout=0.2)
+            except Exception:
+                pass
+            self.active_audio_process = None
+
+        os.system("pkill -9 mpg123 2>/dev/null")
+        os.system("pkill -9 play 2>/dev/null")
+        os.system("pkill -9 aplay 2>/dev/null")
+        os.system("pkill -9 paplay 2>/dev/null")
+
+        def speech_worker():
+            try:
+                from gtts import gTTS
+                audio_file = os.path.join(SCRIPT_DIR, "response.mp3")
                 
-                today_lines = []
-                tomorrow_lines = []
-                weekly_lines = []
-                seen_dates = set()
+                tts = gTTS(text=text, lang=lang, slow=False)
+                tts.save(audio_file)
                 
-                days_full_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+                self.active_audio_process = subprocess.Popen(
+                    ["mpg123", "-q", audio_file],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                self.active_audio_process.wait()
                 
-                for item in fdata.get("list", []):
-                    dt_txt = item["dt_txt"]
-                    item_date, item_time = dt_txt.split()
-                    hour_str = item_time[:5]
-                    temp_val = round(item["main"]["temp"])
-                    desc_val = item["weather"][0]["description"]
-                    
-                    line = f"{hour_str}: {desc_val}, {temp_val}°C"
-                    
-                    if item_date == today_date:
-                        today_lines.append(line)
-                    elif item_date == tomorrow_date:
-                        tomorrow_lines.append(line)
-                        
-                    if item_date not in seen_dates and "12:00" in item_time:
-                        seen_dates.add(item_date)
-                        dt_obj = datetime.strptime(item_date, '%Y-%m-%d')
-                        day_of_week = days_full_ru[dt_obj.weekday()]
-                        weekly_lines.append(f"{day_of_week}: {desc_val}, {temp_val}°C")
-                
-                if today_lines:
-                    today_hourly_forecast = "\n".join(today_lines)
-                else:
-                    today_hourly_forecast = "Почасовой прогноз на сегодня недоступен."
-                    
-                if tomorrow_lines:
-                    tomorrow_hourly_forecast = "\n".join(tomorrow_lines)
-                else:
-                    tomorrow_hourly_forecast = "Почасовой прогноз на завтра недоступен."
-                    
-                if weekly_lines:
-                    weekly_forecast_text = "\n".join(weekly_lines)
-                else:
-                    weekly_forecast_text = "Прогноз на неделю недоступен."
-                
-        except Exception as e:
-            print(f"Weather fetch error: {e}")
-    else:
-        current_weather_text = "API ключ погоды не настроен"
-    
-    root.after(600000, fetch_weather)
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
+                self.active_audio_process = None
+            except Exception as e:
+                print(f"Ошибка речи: {e}")
 
-def speak_russian(text, lang='ru'):
-    global active_audio_process
-    
-    # 1. Instantly kill any currently playing audio process
-    if active_audio_process:
-        try:
-            active_audio_process.terminate()
-            active_audio_process.kill()
-            active_audio_process.wait(timeout=0.2)
-        except Exception:
-            pass
-        active_audio_process = None
+        time.sleep(0.1)
+        threading.Thread(target=speech_worker, daemon=True).start()
 
-    # 2. Force-kill any lingering system audio players to guarantee no overlap
-    os.system("pkill -9 mpg123 2>/dev/null")
-    os.system("pkill -9 play 2>/dev/null")
-    os.system("pkill -9 aplay 2>/dev/null")
-    os.system("pkill -9 paplay 2>/dev/null")
-
-def speech_worker(text, lang):
-    try:
-        from gtts import gTTS
-        
-        # Define absolute path in the script directory
-        audio_file = os.path.join(SCRIPT_DIR, "response.mp3")
-        
-        tts = gTTS(text=text, lang=lang, slow=False)
-        tts.save(audio_file)
-        
-        global active_audio_process
-        active_audio_process = subprocess.Popen(
-            ["mpg123", "-q", audio_file],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        active_audio_process.wait()
-        
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
-        active_audio_process = None
-    except Exception as e:
-        print(f"Ошибка речи: {e}")
-
-def ask_ai(prompt):
-    if GROQ_API_KEY == "gsk_YOUR_GROQ_API_KEY_HERE":
-        return "Пожалуйста, настройте API ключ Groq в коде."
-    
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "qwen/qwen3.8-27b",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Ты голосовой ассистент на умных часах. Отвечай кратко, по делу, исключительно на русском языке, максимум в 1-2 предложениях."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "temperature": 0.7,
-            "max_tokens": 150
-        }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            answer = data["choices"][0]["message"]["content"]
-            if answer:
-                return answer.strip()
-        else:
-            print(f"Groq HTTP error status: {response.status_code}, body: {response.text}")
-    except Exception as e:
-        print(f"Groq connection error: {e}")
-        
-    return "Не удалось связаться с искусственным интеллектом."
-
-def parse_alarm_time(query):
-    time_match = re.search(r'(\d{1,2})[:\s](\d{2})', query)
-    if time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2))
-        if 0 <= hour < 24 and 0 <= minute < 60:
-            return f"{hour:02d}:{minute:02d}"
-            
-    hour_match = re.search(r'(?:на|в)\s+(\d{1,2})\b', query)
-    if hour_match:
-        hour = int(hour_match.group(1))
-        if 0 <= hour < 24:
-            return f"{hour:02d}:00"
-            
-    return None
-
-def parse_reminder_delay(query):
-    match = re.search(r'через\s+(\d+)\s*(мин|м|час|ч|сек|с)', query)
-    if match:
-        val = int(match.group(1))
-        unit = match.group(2)
-        if unit.startswith('час') or unit.startswith('ч'):
-            return val * 3600
-        elif unit.startswith('сек') or unit.startswith('с'):
-            return val
-        else:
-            return val * 60
-    return None
-
-def process_command(query):
-    global alarm_time, alarm_active, display_mode
-    print(f"Распознано: {query}")
-    
-    if alarm_active and any(w in query for w in ["выключ", "отмен", "убер", "сброс"]):
-        stop_all_audio()
-        alarm_time = None
-        speak_russian("Будильник выключен.")
-        return
-
-    wake_word = "алиса"
-    if wake_word not in query and "alisa" not in query:
-        return
-        
-    command = query.replace("алиса", "").replace("alisa", "").strip(" ,.!?-")
-    print(f"Команда: {command}")
-    
-    if not command:
-        speak_russian("Слушаю вас.")
-    elif any(w in query for w in ["стоп", "хватит", "замолчи", "молчи"]):
-        stop_all_audio()
-        speak_russian("Остановлено.")
-        return
-    elif "выключить компьютер" in command or "выключи компьютер" in command:
-        speak_russian("Выключаю компьютер.")
-        stop_all_audio()
-        os.system("sudo shutdown now")
-    elif "выключить экран" in command or "выключи экран" in command:
-        speak_russian("Выключаю экран.")
-        os.system("xrandr --output LVDS-1 --off")
-    elif "включить экран" in command or "включи экран" in command:
-        speak_russian("Включаю экран.")
-        os.system("xrandr --output LVDS-1 --auto")
-    elif any(w in command for w in ["включи свет", "свет включи", "белый экран"]):
-        speak_russian("Включаю свет.")
-        turn_light_on()
-        return
-    elif any(w in command for w in ["выключи свет", "свет выключи"]):
-        speak_russian("Выключаю свет.")
-        turn_light_off()
-        return
-    elif any(w in command for w in ["переведи", "перевести", "как сказать"]):
-        term = re.sub(r'^(переведи|перевести|как сказать)\s+', '', command).strip()
-        if term:
-            speak_russian(f"Перевожу: {term}")
-            show_translation_screen(term)
-        else:
-            speak_russian("Что именно нужно перевести?")
-    elif "выход" in command:
-        speak_russian("Выключаю часы.")
-        stop_all_audio()
-        root.destroy()
-    elif "будильник" in command or "разбуди" in command:
-        if any(w in command for w in ["выключ", "отмен", "убер", "сброс"]):
-            stop_all_audio()
-            if alarm_time:
-                alarm_time = None
-                speak_russian("Будильник выключен.")
-            else:
-                speak_russian("Будильник остановлен.")
-        else:
-            parsed = parse_alarm_time(command)
-            if parsed:
-                alarm_time = parsed
-                speak_russian(f"Будильник установлен на {alarm_time}")
-            else:
-                speak_russian("Укажите время для будильника, например, на 7:30.")
-    elif "напомни" in command or "напомнить" in command:
-        delay = parse_reminder_delay(command)
-        if delay:
-            clean_cmd = re.sub(r'напомнить?', '', command).strip()
-            text_to_remind = re.split(r'через\s+\d+', clean_cmd)[0].strip(" ,.-")
-            if not text_to_remind:
-                text_to_remind = "сделать запланированное"
-            set_reminder(text_to_remind, delay, "one-time")
-        else:
-            # Try parsing advanced reminder with specific date/time
-            event_dt = parse_date_time_reminder(command)
-            if event_dt:
-                clean_cmd = re.sub(r'напомнить?', '', command).strip()
-                # Remove date/time tokens to isolate text
-                for m_name in MONTHS_RU.keys():
-                    clean_cmd = clean_cmd.replace(m_name, "")
-                clean_cmd = re.sub(r'\d{1,2}[:\s]\d{2}', '', clean_cmd)
-                clean_cmd = re.sub(r'\b\d{1,2}\b', '', clean_cmd)
-                clean_cmd = clean_cmd.replace("в", "").replace("на", "").strip(" ,.-")
-                
-                if not clean_cmd:
-                    clean_cmd = "Важное событие"
-                schedule_advanced_reminder(clean_cmd, event_dt)
-            else:
-                speak_russian("Укажите время или дату для напоминания.")
-    elif any(w in command for w in ["прочти", "читай", "что на экране", "прочитать"]):
-        if display_mode == "clock":
+    def update_display(self):
+        if self.display_mode == "clock":
             days_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
             months_ru = ["", "Января", "Февраля", "Марта", "Апреля", "Мая", "Июня", "Июля", "Августа", "Сентября", "Октября", "Ноября", "Декабря"]
+            
             t = time.localtime()
-            day_name = days_ru[t.tm_wday]
-            day_num = t.tm_mday
-            month_name = months_ru[t.tm_mon]
-            current_time = time.strftime('%H:%M')
-            text_to_read = f"Сегодня {day_name}, {day_num} {month_name}. Время {current_time}. Погода в городе {CITY}: {current_weather_text}"
-            speak_russian(text_to_read)
-        else:
-            screen_title = date_label.cget("text")
-            screen_body = weather_label.cget("text")
-            speak_russian(f"{screen_title}. {screen_body}")
-    elif any(w in command for w in ["список напоминаний", "напоминания", "мои напоминания"]):
-        show_reminders_screen()
-    elif any(w in command for w in ["список команд", "команды", "справка"]):
-        show_command_list_screen(command_list_text, "Показываю список доступных команд")
-    elif any(w in command for w in ["недел", "неделю"]):
-        show_weather_screen_only(weekly_forecast_text, "Показываю погоду на неделю")
-    elif "завтра" in command:
-        show_weather_screen_only(tomorrow_hourly_forecast, "Показываю погоду на завтра")
-    elif "сегодня" in command:
-        show_weather_screen_only(today_hourly_forecast, "Почасовой прогноз на сегодня")
-    elif any(word in command for word in ["погод", "температур", "градус"]):
-        show_weather_screen_only(current_weather_text, "Показываю текущую погоду")
-    elif any(word in command for word in ["времен", "час"]):
-        current_time = time.strftime('%H:%M')
-        speak_russian(f"Текущее время {current_time}")
-    elif any(word in command for word in ["обновись", "обновить"]):
-        check_for_updates(manual=True)
-    else:
-        ai_answer = ask_ai(command)
-        speak_russian(ai_answer)
-
-def translate_to_english(text):
-    """Uses Groq AI to translate, provide Cyrillic pronunciation, and format the output."""
-    if GROQ_API_KEY == "gsk_YOUR_GROQ_API_KEY_HERE":
-        return "Перевод недоступен: не настроен ключ Groq."
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "qwen/qwen3.8-27b",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Ты переводчик. Переведи поданную русскую фразу на английский. Верни результат строго в таком формате: [Перевод на английский] | [Транслитерация английских слов русскими буквами]. Больше ничего не пиши."
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
-            ],
-            "temperature": 0.3,
-            "max_tokens": 100
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            answer = data["choices"][0]["message"]["content"].strip()
-            if "|" in answer:
-                eng, translit = answer.split("|", 1)
-                return eng.strip(), translit.strip()
-            return answer, ""
-    except Exception as e:
-        print(f"Translation error: {e}")
-    return "Ошибка перевода", ""
-
-def show_translation_screen(russian_phrase):
-    global display_mode, weather_timer, countdown_seconds
-    display_mode = "translation"
-    
-    frame.place(x=40, y=40, relwidth=0.9, relheight=0.9, anchor='nw')
-    
-    if weather_timer and weather_timer.is_alive():
-        weather_timer.cancel()
-        
-    eng_text, translit_text = translate_to_english(russian_phrase)
-    display_content = f"«{russian_phrase}»\n\nEnglish:\n{eng_text}\n\nПроизношение:\n{translit_text}"
-    
-    date_label.config(text="Перевод фразы")
-    time_label.config(text="", font=('Helvetica', 10))
-    weather_label.config(text=display_content, font=('Helvetica', 20, 'bold'), fg='white')
-    
-    # Speak the English translation with a proper English accent
-    speak_russian(eng_text, lang='en')
-    
-    # Set 5 minutes countdown (300 seconds)
-    countdown_seconds = 300
-    update_countdown_timer()
-
-def update_countdown_timer():
-    global countdown_seconds, weather_timer, display_mode
-    if display_mode == "clock":
-        return
-        
-    if countdown_seconds > 0:
-        mins = countdown_seconds // 60
-        secs = countdown_seconds % 60
-        # Append countdown to the screen title
-        current_title = date_label.cget("text").split(" (")[0]
-        date_label.config(text=f"{current_title} (Закроется через {mins:02d}:{secs:02d})")
-        countdown_seconds -= 1
-        weather_timer = threading.Timer(1.0, update_countdown_timer)
-        weather_timer.start()
-    else:
-        restore_clock_mode()
-
-def voice_listener_loop():
-    time.sleep(5)  # Give PulseAudio/ALSA time to initialize on startup
-    import pyaudio
-    import json
-    from vosk import Model, KaldiRecognizer
-    import audioop
-
-    # Path to your downloaded Vosk Russian model folder
-    MODEL_PATH = "/home/mlurye/vosk-model-small-ru-0.22"
-    
-    if not os.path.exists(MODEL_PATH):
-        print(f"Модель Vosk не найдена по пути: {MODEL_PATH}")
-        return
-
-    try:
-        vosk_model = Model(MODEL_PATH)
-    except Exception as e:
-        print(f"Ошибка загрузки модели Vosk: {e}")
-        return
-
-    # Vosk works best with 16kHz 16-bit mono audio
-    RATE = 16000
-    CHUNK = 4000
-    FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-
-    p = pyaudio.PyAudio()
-    r = sr.Recognizer()
-
-    print("Локальный сторож Vosk запущен (ожидание ключевого слова 'Алиса')...")
-
-    while True:
-        stream = None
-        try:
-            rec = KaldiRecognizer(vosk_model, RATE)
-            rec.SetWords(False)
-
-            stream = p.open(format=FORMAT,
-                            channels=CHANNELS,
-                            rate=RATE,
-                            input=True,
-                            frames_per_buffer=CHUNK)
-
-            # Step 1: Listen locally until "алиса" is recognized in the live stream
-            while True:
-                data = stream.read(CHUNK, exception_on_overflow=False)
-                if not data:
-                    continue
+            date_str = f"{days_ru[t.tm_wday]}, {t.tm_mday} {months_ru[t.tm_mon]}"
+            current_hm = time.strftime('%H:%M')
+            
+            self.date_label.config(text=date_str)
+            self.time_label.config(text=time.strftime('%H:%M:%S'), font=('Helvetica', 110, 'bold'))
+            self.weather_label.config(text=f"Погода в {self.city}: {self.current_weather_text}", font=('Helvetica', 28, 'bold'), fg='lightseagreen')
+            
+            if self.alarm_time and current_hm == self.alarm_time and not self.alarm_triggered_today:
+                self.alarm_triggered_today = True
+                threading.Thread(target=self.trigger_alarm, daemon=True).start()
+            elif current_hm != self.alarm_time:
+                self.alarm_triggered_today = False
                 
-                if rec.AcceptWaveform(data):
-                    result = json.loads(rec.Result())
-                    text = result.get("text", "").lower()
-                    if "алиса" in text or "alisa" in text:
-                        print("Ключевое слово обнаружено локально через Vosk!")
-                        speak_russian("Слушаю.")
+        # Optimized from 100ms to 1000ms
+        self.root.after(1000, self.update_display)
+
+    def shift_position(self):
+        if self.display_mode == "clock":
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            self.frame.place(x=random.randint(40, max(50, screen_width - 650)),
+                             y=random.randint(40, max(50, screen_height - 400)),
+                             relwidth=0.9, relheight=0.9, anchor='nw')
+        self.root.after(30000, self.shift_position)
+
+    def trigger_alarm(self):
+        self.alarm_active = True
+        self.alarm_stop_event.clear()
+        
+        for _ in range(2):
+            if not self.alarm_active or self.alarm_stop_event.is_set():
+                break
+            try:
+                if os.path.exists(CHIME_SOUND_PATH):
+                    self.active_audio_process = subprocess.Popen(["mpg123", "-q", CHIME_SOUND_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    self.active_audio_process = subprocess.Popen(["play", "-q", "-n", "synth", "0.3", "bell", "523"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.active_audio_process.wait()
+            except Exception:
+                pass
+            
+            for _ in range(50):
+                if not self.alarm_active or self.alarm_stop_event.is_set():
+                    break
+                time.sleep(0.1)
+                
+        self.alarm_active = False
+        self.alarm_time = None
+
+    def fetch_weather(self):
+        if self.weather_api_key != "YOUR_WEATHER_API_KEY":
+            try:
+                url_current = f"https://api.openweathermap.org/data/2.5/weather?q={self.city}&appid={self.weather_api_key}&units=metric&lang=ru"
+                resp_curr = requests.get(url_current, timeout=10)
+                if resp_curr.status_code == 200:
+                    data = resp_curr.json()
+                    self.current_weather_text = f"{data['weather'][0]['description'].capitalize()}, {round(data['main']['temp'])}°C"
+
+                url_forecast = f"https://api.openweathermap.org/data/2.5/forecast?q={self.city}&appid={self.weather_api_key}&units=metric&lang=ru"
+                resp_fore = requests.get(url_forecast, timeout=10)
+                if resp_fore.status_code == 200:
+                    fdata = resp_fore.json()
+                    today_date = datetime.now().strftime('%Y-%m-%d')
+                    tomorrow_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+                    
+                    today_lines, tomorrow_lines, weekly_lines, seen_dates = [], [], [], set()
+                    days_full_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+                    
+                    for item in fdata.get("list", []):
+                        item_date, item_time = item["dt_txt"].split()
+                        line = f"{item_time[:5]}: {item['weather'][0]['description']}, {round(item['main']['temp'])}°C"
+                        if item_date == today_date:
+                            today_lines.append(line)
+                        elif item_date == tomorrow_date:
+                            tomorrow_lines.append(line)
+                        if item_date not in seen_dates and "12:00" in item_time:
+                            seen_dates.add(item_date)
+                            dt_obj = datetime.strptime(item_date, '%Y-%m-%d')
+                            weekly_lines.append(f"{days_full_ru[dt_obj.weekday()]} : {item['weather'][0]['description']}, {round(item['main']['temp'])}°C")
+                    
+                    self.today_hourly_forecast = "\n".join(today_lines) if today_lines else "Недоступно."
+                    self.tomorrow_hourly_forecast = "\n".join(tomorrow_lines) if tomorrow_lines else "Недоступно."
+                    self.weekly_forecast_text = "\n".join(weekly_lines) if weekly_lines else "Недоступно."
+            except Exception as e:
+                print(f"Weather fetch error: {e}")
+        else:
+            self.current_weather_text = "API ключ погоды не настроен"
+        
+        self.root.after(600000, self.fetch_weather)
+
+    def ask_ai(self, prompt):
+        if self.groq_api_key == "gsk_YOUR_GROQ_API_KEY_HERE":
+            return "Пожалуйста, настройте API ключ Groq в коде."
+        try:
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "qwen/qwen3.8-27b",
+                    "messages": [
+                        {"role": "system", "content": "Ты голосовой ассистент на умных часах. Отвечай кратко, по делу, исключительно на русском языке, максимум в 1-2 предложениях."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 150
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                answer = response.json()["choices"][0]["message"]["content"]
+                if answer: return answer.strip()
+        except Exception as e:
+            print(f"Groq connection error: {e}")
+        return "Не удалось связаться с искусственным интеллектом."
+
+    def check_for_updates(self, manual=False):
+        def update_worker():
+            if manual:
+                self.speak_russian("Проверяю обновления.")
+                time.sleep(3.5)
+            try:
+                response = requests.get(self.github_raw_url, timeout=10)
+                if response.status_code == 200:
+                    remote_code = response.text
+                    script_path = os.path.abspath(__file__)
+                    with open(script_path, "r", encoding="utf-8") as f:
+                        local_code = f.read()
+                    if remote_code.strip() != local_code.strip():
+                        with open(script_path, "w", encoding="utf-8") as f:
+                            f.write(remote_code)
+                        self.speak_russian("Обновление загружено. Перезапускаюсь.")
+                        time.sleep(3.0)
+                        os.execv(sys.executable, ['python'] + sys.argv)
+                    elif manual:
+                        self.speak_russian("Обновлений не найдено.")
+                elif manual:
+                    self.speak_russian("Не удалось получить ответ от сервера.")
+            except Exception:
+                if manual:
+                    self.speak_russian("Ошибка соединения с сетью.")
+        threading.Thread(target=update_worker, daemon=True).start()
+
+    def voice_listener_loop(self):
+        time.sleep(5)
+        import pyaudio
+        from vosk import Model, KaldiRecognizer
+        import audioop
+
+        if not os.path.exists(self.model_path):
+            print(f"Модель Vosk не найдена по пути: {self.model_path}")
+            return
+
+        try:
+            vosk_model = Model(self.model_path)
+        except Exception as e:
+            print(f"Ошибка загрузки модели Vosk: {e}")
+            return
+
+        RATE, CHUNK, CHANNELS = 16000, 4000, 1
+        p = pyaudio.PyAudio()
+        r = sr.Recognizer()
+
+        print("Локальный сторож Vosk запущен...")
+
+        while True:
+            stream = None
+            try:
+                rec = KaldiRecognizer(vosk_model, RATE)
+                rec.SetWords(False)
+                stream = p.open(format=pyaudio.paInt16, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+
+                while True:
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    if data and rec.AcceptWaveform(data):
+                        recognized_text = json.loads(rec.Result()).get("text", "").lower()
+                        if "алиса" in recognized_text or "alisa" in recognized_text:
+                            self.speak_russian("Слушаю.")
+                            break
+
+                frames, silent_chunks = [], 0
+                silence_threshold_chunks = int((RATE / CHUNK) * 3)
+
+                while True:
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    if not data: break
+                    frames.append(data)
+                    if audioop.rms(data, 2) < 300:
+                        silent_chunks += 1
+                    else:
+                        silent_chunks = 0
+                    if silent_chunks > silence_threshold_chunks:
                         break
 
-            # Step 2: Wake word detected, now record command until a 3-second pause
-            frames = []
-            silent_chunks = 0
-            chunks_per_second = RATE / CHUNK
-            silence_threshold_chunks = int(chunks_per_second * 3)
+                stream.stop_stream()
+                stream.close()
+                stream = None
 
-            while True:
-                data = stream.read(CHUNK, exception_on_overflow=False)
-                if not data:
-                    break
-                frames.append(data)
+                if frames:
+                    query = r.recognize_google(sr.AudioData(b''.join(frames), RATE, 2), language="ru-RU").lower()
+                    print(f"Распознано: {query}")
+                    
+                    if "напомни" in query:
+                        match_delay = re.search(r"напомни\s+(.*?)\s+через\s+(\d+)\s*(минут|минуту|минуты|час|часа|часов)", query)
+                        if match_delay:
+                            text_reminder = match_delay.group(1)
+                            amount = int(match_delay.group(2))
+                            unit = match_delay.group(3)
+                            delay_seconds = amount * 60 if "мин" in unit else amount * 3600
+                            self.add_reminder(text_reminder, delay_seconds)
+                        else:
+                            self.speak_russian("Не поняла время напоминания.")
+                    elif "список напоминаний" in query:
+                        if self.reminders:
+                            texts = ", ".join([rem["text"] for rem in self.reminders])
+                            self.speak_russian(f"У вас активны напоминания: {texts}")
+                        else:
+                            self.speak_russian("Активных напоминаний нет.")
+            except Exception as e:
+                print(f"Ошибка аудиопотока Vosk: {e}")
+                if stream:
+                    try: stream.stop_stream(); stream.close()
+                    except: pass
+                time.sleep(1)
 
-                # Measure volume/energy to detect speech pauses
-                rms = audioop.rms(data, 2)
-                if rms < 300:  # Adjust threshold based on your microphone background noise
-                    silent_chunks += 1
-                else:
-                    silent_chunks = 0  # Reset if sound/speech is detected
+    def on_closing(self):
+        self.stop_all_audio()
+        self.root.destroy()
 
-                # Stop recording if silence lasts for 3 seconds
-                if silent_chunks > silence_threshold_chunks:
-                    break
-
-            stream.stop_stream()
-            stream.close()
-            stream = None
-
-            # Step 3: Send only the final captured command audio off-device for text transcription
-            if frames:
-                complete_audio = sr.AudioData(b''.join(frames), RATE, 2)
-                query = r.recognize_google(complete_audio, language="ru-RU").lower()
-                process_command("алиса " + query)
-
-        except sr.UnknownValueError:
-            print("Не удалось разобрать фразу.")
-            speak_russian("Не расслышала команду. Повторите, пожалуйста.")
-        except Exception as e:
-            print(f"Ошибка аудиопотока Vosk: {e}")
-            if stream:
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except:
-                    pass
-            time.sleep(1)
-
-# --- GUI SETUP ---
-root = tk.Tk()
-root.title("Smart Clock")
-root.attributes('-fullscreen', True)
-root.configure(background='black')
-root.config(cursor="none")
-
-def on_closing():
-    stop_all_audio()
-    root.destroy()
-
-root.protocol("WM_DELETE_WINDOW", on_closing)
-
-frame = tk.Frame(root, bg='black')
-frame.place(relx=0.05, rely=0.05, relwidth=0.9, relheight=0.9)
-
-weather_label = tk.Label(frame, font=('Helvetica', 22, 'bold'), fg='lightseagreen', bg='black', justify='left', anchor='w')
-weather_label.pack(anchor='w', pady=(0, 10))
-
-date_label = tk.Label(frame, font=('Helvetica', 32, 'bold'), fg='mediumseagreen', bg='black', anchor='w')
-date_label.pack(anchor='w', pady=(0, 15))
-
-time_label = tk.Label(frame, font=('Helvetica', 110, 'bold'), fg='mediumseagreen', bg='black', anchor='w')
-time_label.pack(anchor='w', pady=(0, 0))
-
-root.bind('<Escape>', lambda e: on_closing())
-
-update_display()
-fetch_weather()
-shift_position()
-restore_pending_reminders()
-
-voice_thread = threading.Thread(target=voice_listener_loop, daemon=True)
-voice_thread.start()
-
-def delayed_update_check():
-    check_for_updates(manual=False)
-
-root.after(5000, delayed_update_check)
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = BigClockApp(root)
+    root.mainloop()
